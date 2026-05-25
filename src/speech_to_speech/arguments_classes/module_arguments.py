@@ -28,10 +28,10 @@ class ModuleArguments:
             "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', or 'paraformer'. Default is 'parakeet-tdt'."
         },
     )
-    llm_backend: Optional[Literal["transformers", "mlx-lm", "responses-api"]] = field(
+    llm_backend: Optional[Literal["transformers", "mlx-lm", "responses-api", "opencode"]] = field(
         default="responses-api",
         metadata={
-            "help": "The LLM backend to use. Either 'transformers', 'mlx-lm', or 'responses-api'. Default is 'responses-api'."
+            "help": "The LLM backend to use. Either 'transformers', 'mlx-lm', 'responses-api', or 'opencode'. Default is 'responses-api'."
         },
     )
     tts: Optional[Literal["melo", "chatTTS", "facebookMMS", "pocket", "kokoro", "qwen3"]] = field(
@@ -59,4 +59,16 @@ class ModuleArguments:
         metadata={
             "help": "Minimum silence duration (ms) before ending speech when live transcription is enabled (default: 500ms)"
         },
+    )
+    start_enabled: bool = field(
+        default=False,
+        metadata={"help": "Start the warmed pipeline enabled. Default is false, so controlled runs start hot but idle."},
+    )
+    control_host: str = field(
+        default="127.0.0.1",
+        metadata={"help": "Host for the optional pipeline enable/disable HTTP API. Default is 127.0.0.1."},
+    )
+    control_port: int | None = field(
+        default=None,
+        metadata={"help": "Enable an HTTP API on this port to toggle the warmed pipeline on and off."},
     )

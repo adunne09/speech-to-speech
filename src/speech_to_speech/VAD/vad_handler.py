@@ -52,8 +52,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         enable_realtime_transcription: bool = False,
         realtime_processing_pause: float = 0.25,
         text_output_queue: Queue[TextEventItem] | None = None,
+        enabled_event: Event | None = None,
     ) -> None:
         self.should_listen = should_listen
+        self.enabled_event = enabled_event
         self.sample_rate = sample_rate
         self.min_silence_ms = min_silence_ms
         self.min_speech_ms = min_speech_ms
@@ -99,6 +101,9 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self._log_progressive_yields = 0
         self._speech_started_emitted = False
 
+    def _enabled(self) -> bool:
+        return self.enabled_event is None or self.enabled_event.is_set()
+
     @property
     def _audio_ms(self) -> int:
         """Cumulative audio received so far, in milliseconds."""
@@ -141,7 +146,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
             audio_chunk, runtime_config = audio_chunk
         self._apply_runtime_turn_detection(runtime_config)
 
-        if not self.should_listen.is_set():
+        if not self._enabled() or not self.should_listen.is_set():
             return
 
         # Normal listening mode
@@ -300,7 +305,8 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.last_process_time = 0.0
         self._total_samples = 0
         self._speech_started_emitted = False
-        self.should_listen.set()
+        if self._enabled():
+            self.should_listen.set()
         logger.debug("VAD session state reset")
 
     @property

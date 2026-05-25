@@ -37,6 +37,9 @@ from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
 )
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
+from speech_to_speech.arguments_classes.opencode_language_model_arguments import (
+    OpencodeLanguageModelHandlerArguments,
+)
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
 )
@@ -97,6 +100,7 @@ class ParsedArguments:
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments
     language_model_handler_kwargs: LanguageModelHandlerArguments
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments
+    opencode_language_model_handler_kwargs: OpencodeLanguageModelHandlerArguments
     chat_tts_handler_kwargs: ChatTTSHandlerArguments
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments
@@ -128,14 +132,19 @@ def parse_arguments() -> ParsedArguments:
     _is_json = len(sys.argv) == 2 and sys.argv[1].endswith(".json")
     if _is_json:
         with open(sys.argv[1]) as _f:
-            _use_responses_api = json.load(_f).get("llm_backend") == "responses-api"
+            _llm_backend = json.load(_f).get("llm_backend", "responses-api")
     else:
         _pre = argparse.ArgumentParser(add_help=False)
         _pre.add_argument("--llm_backend", default="responses-api")
-        _use_responses_api = _pre.parse_known_args()[0].llm_backend == "responses-api"
+        _llm_backend = _pre.parse_known_args()[0].llm_backend
 
-    _lm_class = ResponsesApiLanguageModelHandlerArguments if _use_responses_api else LanguageModelHandlerArguments
-    logger.debug("LLM backend pre-parse: use_responses_api=%s, registering %s", _use_responses_api, _lm_class.__name__)
+    if _llm_backend == "responses-api":
+        _lm_class = ResponsesApiLanguageModelHandlerArguments
+    elif _llm_backend == "opencode":
+        _lm_class = OpencodeLanguageModelHandlerArguments
+    else:
+        _lm_class = LanguageModelHandlerArguments
+    logger.debug("LLM backend pre-parse: backend=%s, registering %s", _llm_backend, _lm_class.__name__)
 
     parser = HfArgumentParser(
         (  # type: ignore[arg-type]
@@ -181,6 +190,9 @@ def parse_arguments() -> ParsedArguments:
         language_model_handler_kwargs=by_type.get(LanguageModelHandlerArguments, LanguageModelHandlerArguments()),
         responses_api_language_model_handler_kwargs=by_type.get(
             ResponsesApiLanguageModelHandlerArguments, ResponsesApiLanguageModelHandlerArguments()
+        ),
+        opencode_language_model_handler_kwargs=by_type.get(
+            OpencodeLanguageModelHandlerArguments, OpencodeLanguageModelHandlerArguments()
         ),
         chat_tts_handler_kwargs=by_type[ChatTTSHandlerArguments],
         facebook_mms_tts_handler_kwargs=by_type[FacebookMMSTTSHandlerArguments],
@@ -274,6 +286,7 @@ def prepare_all_args(
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    opencode_language_model_handler_kwargs: OpencodeLanguageModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
@@ -289,6 +302,7 @@ def prepare_all_args(
         parakeet_tdt_stt_handler_kwargs,
         language_model_handler_kwargs,
         responses_api_language_model_handler_kwargs,
+        opencode_language_model_handler_kwargs,
         chat_tts_handler_kwargs,
         facebook_mms_tts_handler_kwargs,
         pocket_tts_handler_kwargs,
@@ -303,6 +317,7 @@ def prepare_all_args(
     rename_args(parakeet_tdt_stt_handler_kwargs, "parakeet_tdt")
     rename_args(language_model_handler_kwargs, "llm")
     rename_args(responses_api_language_model_handler_kwargs, "responses_api")
+    rename_args(opencode_language_model_handler_kwargs, "opencode")
     rename_args(chat_tts_handler_kwargs, "chat_tts")
     rename_args(facebook_mms_tts_handler_kwargs, "facebook_mms")
     rename_args(pocket_tts_handler_kwargs, "pocket_tts")
@@ -314,6 +329,7 @@ def initialize_queues_and_events() -> dict[str, Any]:
     return {
         "stop_event": Event(),
         "should_listen": Event(),
+        "enabled_event": Event(),
         "response_playing": Event(),
         "cancel_scope": CancelScope(),
         "recv_audio_chunks_queue": Queue[AudioInItem](),
@@ -340,6 +356,7 @@ def build_pipeline(
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    opencode_language_model_handler_kwargs: OpencodeLanguageModelHandlerArguments,
     chat_tts_handler_kwargs: ChatTTSHandlerArguments,
     facebook_mms_tts_handler_kwargs: FacebookMMSTTSHandlerArguments,
     pocket_tts_handler_kwargs: PocketTTSHandlerArguments,
@@ -349,6 +366,7 @@ def build_pipeline(
 ) -> ThreadManager:
     stop_event = queues_and_events["stop_event"]
     should_listen = queues_and_events["should_listen"]
+    enabled_event = queues_and_events["enabled_event"]
     response_playing = queues_and_events["response_playing"]
     cancel_scope = queues_and_events["cancel_scope"]
     recv_audio_chunks_queue = queues_and_events["recv_audio_chunks_queue"]
@@ -362,6 +380,9 @@ def build_pipeline(
         None  # Only set for websocket/realtime modes; kept None otherwise to avoid unbounded queue growth
     )
 
+    if module_kwargs.start_enabled:
+        enabled_event.set()
+
     comms_handlers: list[Any] = []
     if module_kwargs.mode == "local":
         from speech_to_speech.connections.local_audio_streamer import LocalAudioStreamer
@@ -370,9 +391,11 @@ def build_pipeline(
             input_queue=recv_audio_chunks_queue,
             output_queue=send_audio_chunks_queue,
             should_listen=should_listen,
+            enabled_event=enabled_event,
         )
         comms_handlers = [local_audio_streamer]
-        should_listen.set()
+        if enabled_event.is_set():
+            should_listen.set()
     elif module_kwargs.mode == "websocket":
         from speech_to_speech.connections.websocket_streamer import WebSocketStreamer
 
@@ -383,6 +406,7 @@ def build_pipeline(
             output_queue=send_audio_chunks_queue,
             should_listen=should_listen,
             text_output_queue=text_output_queue,
+            enabled_event=enabled_event,
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
         )
@@ -397,6 +421,7 @@ def build_pipeline(
         for kw in (
             language_model_handler_kwargs,
             responses_api_language_model_handler_kwargs,
+            opencode_language_model_handler_kwargs,
             kokoro_tts_handler_kwargs,
             qwen3_tts_handler_kwargs,
             pocket_tts_handler_kwargs,
@@ -407,6 +432,8 @@ def build_pipeline(
 
         if module_kwargs.llm_backend == "responses-api":
             chat_size = vars(responses_api_language_model_handler_kwargs).get("chat_size", 10)
+        elif module_kwargs.llm_backend == "opencode":
+            chat_size = vars(opencode_language_model_handler_kwargs).get("chat_size", 10)
         else:
             chat_size = vars(language_model_handler_kwargs).get("chat_size", 10)
 
@@ -419,6 +446,7 @@ def build_pipeline(
             cancel_scope=cancel_scope,
             text_output_queue=text_output_queue,
             text_prompt_queue=text_prompt_queue,
+            enabled_event=enabled_event,
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
             chat_size=chat_size,
@@ -433,6 +461,7 @@ def build_pipeline(
                 stop_event,
                 recv_audio_chunks_queue,
                 should_listen,
+                enabled_event=enabled_event,
                 host=socket_receiver_kwargs.recv_host,
                 port=socket_receiver_kwargs.recv_port,
                 chunk_size=socket_receiver_kwargs.chunk_size,
@@ -441,6 +470,7 @@ def build_pipeline(
                 stop_event,
                 send_audio_chunks_queue,
                 should_listen,
+                enabled_event=enabled_event,
                 host=socket_sender_kwargs.send_host,
                 port=socket_sender_kwargs.send_port,
             ),
@@ -450,6 +480,7 @@ def build_pipeline(
     if module_kwargs.enable_live_transcription:
         vad_handler_kwargs.enable_realtime_transcription = True
         vad_handler_kwargs.realtime_processing_pause = module_kwargs.live_transcription_update_interval
+    vars(vad_handler_kwargs)["enabled_event"] = enabled_event
 
     vad = VADHandler(
         stop_event,
@@ -462,26 +493,22 @@ def build_pipeline(
     transcription_notifier_kwargs: dict[str, Any] = {
         "text_output_queue": text_output_queue,
         "should_listen": should_listen,
+        "enabled_event": enabled_event,
     }
     if module_kwargs.mode != "realtime":
         if module_kwargs.llm_backend == "responses-api":
             _lm_vars = vars(responses_api_language_model_handler_kwargs)
-            transcription_notifier_kwargs["runtime_config"] = RuntimeConfig(
-                chat=Chat(_lm_vars.get("chat_size", 30)),
-                session=RealtimeSessionCreateRequest(
-                    type="realtime",
-                    instructions=_lm_vars.get("init_chat_prompt"),
-                ),
-            )
+        elif module_kwargs.llm_backend == "opencode":
+            _lm_vars = vars(opencode_language_model_handler_kwargs)
         else:
             _lm_vars = vars(language_model_handler_kwargs)
-            transcription_notifier_kwargs["runtime_config"] = RuntimeConfig(
-                chat=Chat(_lm_vars.get("chat_size", 30)),
-                session=RealtimeSessionCreateRequest(
-                    type="realtime",
-                    instructions=_lm_vars.get("init_chat_prompt"),
-                ),
-            )
+        transcription_notifier_kwargs["runtime_config"] = RuntimeConfig(
+            chat=Chat(_lm_vars.get("chat_size", 30)),
+            session=RealtimeSessionCreateRequest(
+                type="realtime",
+                instructions=_lm_vars.get("init_chat_prompt"),
+            ),
+        )
 
     transcription_notifier = TranscriptionNotifier(
         stop_event,
@@ -509,6 +536,7 @@ def build_pipeline(
         lm_response_queue,
         language_model_handler_kwargs,
         responses_api_language_model_handler_kwargs,
+        opencode_language_model_handler_kwargs,
     )
 
     # Add LM output processor to extract tools and forward clean text to TTS
@@ -535,7 +563,31 @@ def build_pipeline(
     )
 
     # Build the handler chain
-    pipeline_handlers = [*comms_handlers, vad, stt, transcription_notifier, lm, lm_processor, tts]
+    control_handlers: list[Any] = []
+    if module_kwargs.control_port is not None:
+        from speech_to_speech.pipeline.control_server import PipelineControlServer
+
+        control_handlers.append(
+            PipelineControlServer(
+                stop_event,
+                enabled_event,
+                should_listen,
+                module_kwargs.control_host,
+                module_kwargs.control_port,
+                queues_to_clear=[
+                    recv_audio_chunks_queue,
+                    spoken_prompt_queue,
+                    stt_output_queue,
+                    text_prompt_queue,
+                    lm_response_queue,
+                    lm_processed_queue,
+                    send_audio_chunks_queue,
+                ],
+                cancel_scope=cancel_scope,
+            )
+        )
+
+    pipeline_handlers = [*control_handlers, *comms_handlers, vad, stt, transcription_notifier, lm, lm_processor, tts]
 
     return ThreadManager(pipeline_handlers)
 
@@ -627,6 +679,7 @@ def get_llm_handler(
     lm_response_queue: Queue[LMOutItem],
     language_model_handler_kwargs: LanguageModelHandlerArguments,
     responses_api_language_model_handler_kwargs: ResponsesApiLanguageModelHandlerArguments,
+    opencode_language_model_handler_kwargs: OpencodeLanguageModelHandlerArguments,
 ) -> BaseHandler[LLMIn, LLMOut]:
     if module_kwargs.llm_backend == "responses-api":
         from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
@@ -636,6 +689,16 @@ def get_llm_handler(
             queue_in=text_prompt_queue,
             queue_out=lm_response_queue,
             setup_kwargs=vars(responses_api_language_model_handler_kwargs),
+        )
+
+    if module_kwargs.llm_backend == "opencode":
+        from speech_to_speech.LLM.opencode_language_model import OpencodeModelHandler
+
+        return OpencodeModelHandler(
+            stop_event,
+            queue_in=text_prompt_queue,
+            queue_out=lm_response_queue,
+            setup_kwargs=vars(opencode_language_model_handler_kwargs),
         )
 
     if module_kwargs.llm_backend in ("transformers", "mlx-lm"):
@@ -662,7 +725,7 @@ def get_llm_handler(
             setup_kwargs=lm_kwargs,
         )
 
-    raise ValueError("The LLM should be either transformers, mlx-lm or responses-api")
+    raise ValueError("The LLM should be either transformers, mlx-lm, responses-api or opencode")
 
 
 def get_tts_handler(
@@ -756,6 +819,7 @@ def main() -> None:
         args.parakeet_tdt_stt_handler_kwargs,
         args.language_model_handler_kwargs,
         args.responses_api_language_model_handler_kwargs,
+        args.opencode_language_model_handler_kwargs,
         args.chat_tts_handler_kwargs,
         args.facebook_mms_tts_handler_kwargs,
         args.pocket_tts_handler_kwargs,
@@ -778,6 +842,7 @@ def main() -> None:
         args.parakeet_tdt_stt_handler_kwargs,
         args.language_model_handler_kwargs,
         args.responses_api_language_model_handler_kwargs,
+        args.opencode_language_model_handler_kwargs,
         args.chat_tts_handler_kwargs,
         args.facebook_mms_tts_handler_kwargs,
         args.pocket_tts_handler_kwargs,

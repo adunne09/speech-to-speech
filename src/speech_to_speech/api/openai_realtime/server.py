@@ -32,6 +32,7 @@ class RealtimeServer:
         cancel_scope: CancelScope | None = None,
         text_output_queue: Queue[TextEventItem] | None = None,
         text_prompt_queue: Queue[TextPromptItem] | None = None,
+        enabled_event: Event | None = None,
         host: str = "0.0.0.0",
         port: int = 8765,
         chat_size: int = 10,
@@ -44,6 +45,7 @@ class RealtimeServer:
         self.should_listen = should_listen
         self.response_playing = response_playing
         self.cancel_scope = cancel_scope
+        self.enabled_event = enabled_event
         self.host = host
         self.port = port
         self.chat_size = chat_size
@@ -64,6 +66,7 @@ class RealtimeServer:
             response_playing=self.response_playing,
             cancel_scope=self.cancel_scope,
             stop_event=self.stop_event,
+            enabled_event=self.enabled_event,
         )
 
         logger.info(f"OpenAI Realtime API server starting on ws://{self.host}:{self.port}/v1/realtime")

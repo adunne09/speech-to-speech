@@ -32,6 +32,7 @@ class WebSocketStreamer:
         output_queue: Queue[AudioOutItem],
         should_listen: Event,
         text_output_queue: Queue[TextEventItem] | None = None,
+        enabled_event: Event | None = None,
         host: str = "0.0.0.0",
         port: int = 8765,
     ) -> None:
@@ -40,11 +41,15 @@ class WebSocketStreamer:
         self.output_queue = output_queue  # TTS -> clients
         self.text_output_queue = text_output_queue  # Text messages -> clients
         self.should_listen = should_listen
+        self.enabled_event = enabled_event
         self.host = host
         self.port = port
         self.clients: set[ServerConnection] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.server: Any = None
+
+    def _enabled(self) -> bool:
+        return self.enabled_event is None or self.enabled_event.is_set()
 
     def run(self) -> None:
         """Run the WebSocket server (called from a thread)."""
@@ -115,15 +120,16 @@ class WebSocketStreamer:
                             q.get_nowait()
                         except Empty:
                             break
-            self.should_listen.set()
-            logger.debug("Listening enabled, edge queues drained (should_listen.set())")
+            if self._enabled():
+                self.should_listen.set()
+                logger.debug("Listening enabled, edge queues drained (should_listen.set())")
 
         try:
             logger.debug(f"Client {client_id}: Starting message receive loop")
             async for message in websocket:
                 if isinstance(message, bytes):
                     logger.debug(f"Client {client_id}: Received {len(message)} bytes of audio")
-                    if self.should_listen.is_set():
+                    if self._enabled() and self.should_listen.is_set():
                         # Split into 512-sample (1024 bytes) chunks for VAD.
                         # Keep a per-client remainder buffer so no samples are dropped
                         # when WebSocket frame boundaries are not aligned.
@@ -177,8 +183,9 @@ class WebSocketStreamer:
                                 *[client.send(data) for client in self.clients],
                                 return_exceptions=True,
                             )
-                        self.should_listen.set()
-                        logger.debug("Response complete, listening re-enabled")
+                        if self._enabled():
+                            self.should_listen.set()
+                            logger.debug("Response complete, listening re-enabled")
                         continue
                     if is_control_message(audio_chunk, SESSION_END.kind):
                         audio_buffer.clear()

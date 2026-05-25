@@ -29,6 +29,7 @@ class SocketReceiver:
         stop_event: Event,
         queue_out: Queue[AudioInItem],
         should_listen: Event,
+        enabled_event: Event | None = None,
         host: str = "0.0.0.0",
         port: int = 12345,
         chunk_size: int = 1024,
@@ -36,9 +37,13 @@ class SocketReceiver:
         self.stop_event = stop_event
         self.queue_out = queue_out
         self.should_listen = should_listen
+        self.enabled_event = enabled_event
         self.chunk_size = chunk_size
         self.host = host
         self.port = port
+
+    def _enabled(self) -> bool:
+        return self.enabled_event is None or self.enabled_event.is_set()
 
     def receive_full_chunk(self, conn: socket.socket, chunk_size: int) -> bytes | None:
         data = b""
@@ -59,7 +64,8 @@ class SocketReceiver:
         self.conn, _ = self.socket.accept()
         logger.info("receiver connected")
 
-        self.should_listen.set()
+        if self._enabled():
+            self.should_listen.set()
         listen_cleared_at = None
         while not self.stop_event.is_set():
             audio_chunk = self.receive_full_chunk(self.conn, self.chunk_size)
@@ -67,10 +73,10 @@ class SocketReceiver:
                 # connection closed
                 self.queue_out.put(PIPELINE_END)
                 break
-            if self.should_listen.is_set():
+            if self._enabled() and self.should_listen.is_set():
                 self.queue_out.put(audio_chunk)
                 listen_cleared_at = None
-            else:
+            elif self._enabled():
                 # Track how long should_listen has been cleared
                 if listen_cleared_at is None:
                     listen_cleared_at = time.monotonic()
@@ -81,5 +87,7 @@ class SocketReceiver:
                     )
                     self.should_listen.set()
                     listen_cleared_at = None
+            else:
+                listen_cleared_at = None
         self.conn.close()
         logger.info("Receiver closed")

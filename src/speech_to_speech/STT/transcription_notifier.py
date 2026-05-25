@@ -34,10 +34,15 @@ class TranscriptionNotifier(BaseHandler[STTOut, Union[STTOut, LLMIn]]):
         text_output_queue: Queue[TextEventItem] | None = None,
         runtime_config: RuntimeConfig | None = None,
         should_listen: Event | None = None,
+        enabled_event: Event | None = None,
     ) -> None:
         self.text_output_queue = text_output_queue
         self.runtime_config = runtime_config
         self.should_listen = should_listen
+        self.enabled_event = enabled_event
+
+    def _enabled(self) -> bool:
+        return self.enabled_event is None or self.enabled_event.is_set()
 
     def process(self, transcription: STTOut) -> Iterator[Union[STTOut, LLMIn]]:
         if isinstance(transcription, PartialTranscription):
@@ -62,7 +67,7 @@ class TranscriptionNotifier(BaseHandler[STTOut, Union[STTOut, LLMIn]]):
 
         if not transcript:
             logger.debug("Transcription completed with empty transcript")
-            if self.should_listen is not None:
+            if self.should_listen is not None and self._enabled():
                 self.should_listen.set()
                 logger.debug("Empty transcription completed; listening re-enabled")
             return

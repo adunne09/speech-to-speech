@@ -64,7 +64,11 @@ def create_app(
     response_playing: ThreadingEvent | None,
     cancel_scope: CancelScope | None,
     stop_event: ThreadingEvent,
+    enabled_event: ThreadingEvent | None = None,
 ) -> FastAPI:
+
+    def _enabled() -> bool:
+        return enabled_event is None or enabled_event.is_set()
 
     def _flush_queue(q: Queue[QItem], *, preserve: Callable[[QItem], bool] | None = None) -> None:
         """Drain a queue, optionally preserving items matching *preserve*.
@@ -99,7 +103,8 @@ def create_app(
             response_playing.clear()
         if cancel_scope:
             cancel_scope.reset()
-        should_listen.set()
+        if _enabled():
+            should_listen.set()
 
     def _to_audio_bytes(chunk: AudioOutItem) -> bytes:
         if isinstance(chunk, PipelineControlMessage):
@@ -170,6 +175,8 @@ def create_app(
                     continue
 
                 if isinstance(event, InputAudioBufferAppendEvent):
+                    if not _enabled() or not should_listen.is_set():
+                        continue
                     chunks = service.handle_audio_append(session_id, event)
                     rt_cfg = service._state(session_id).runtime_config
                     for chunk in chunks:
@@ -191,6 +198,9 @@ def create_app(
                         await _send_events(ws, events)
 
                 elif isinstance(event, ResponseCreateEvent):
+                    if not _enabled():
+                        await _send_event(ws, service.make_error("Pipeline is disabled.", "pipeline_disabled"))
+                        continue
                     result = service.handle_response_create(session_id, event)
                     if result:
                         if result.type != "error" and cancel_scope:
@@ -206,6 +216,8 @@ def create_app(
                     events = service.handle_response_cancel(session_id)
                     if events:
                         await _send_events(ws, events)
+                    if not _enabled():
+                        should_listen.clear()
                     if response_playing:
                         response_playing.clear()
 
@@ -294,8 +306,9 @@ def create_app(
                             response_playing.clear()
                         if cancel_scope:
                             cancel_scope.response_done()
-                        should_listen.set()
-                        logger.info("Response complete, listening re-enabled")
+                        if _enabled():
+                            should_listen.set()
+                            logger.info("Response complete, listening re-enabled")
                         continue
 
                     if is_control_message(audio_chunk):
@@ -327,7 +340,8 @@ def create_app(
 
                     if response_playing and not response_playing.is_set():
                         response_playing.set()
-                        should_listen.set()
+                        if _enabled():
+                            should_listen.set()
 
                     for cid in service.connection_ids:
                         ws = app.state.websockets.get(cid)

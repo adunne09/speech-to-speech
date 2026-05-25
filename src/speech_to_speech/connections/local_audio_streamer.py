@@ -18,6 +18,7 @@ class LocalAudioStreamer:
         input_queue: Queue[AudioInItem],
         output_queue: Queue[AudioOutItem],
         should_listen: threading.Event,
+        enabled_event: threading.Event | None = None,
         list_play_chunk_size: int = 512,
     ) -> None:
         self.list_play_chunk_size = list_play_chunk_size
@@ -26,6 +27,10 @@ class LocalAudioStreamer:
         self.input_queue = input_queue
         self.output_queue = output_queue
         self.should_listen = should_listen
+        self.enabled_event = enabled_event
+
+    def _enabled(self) -> bool:
+        return self.enabled_event is None or self.enabled_event.is_set()
 
     def run(self) -> None:
         # Pre-generate a static dither buffer (±1 LSB, -96 dB) to keep the
@@ -40,7 +45,8 @@ class LocalAudioStreamer:
 
             if self.output_queue.empty():
                 pcm = np.ascontiguousarray(indata, dtype=np.int16)
-                self.input_queue.put(pcm.tobytes())
+                if self._enabled() and self.should_listen.is_set():
+                    self.input_queue.put(pcm.tobytes())
                 outdata[:] = dither
             else:
                 try:
@@ -48,8 +54,9 @@ class LocalAudioStreamer:
                     if isinstance(audio_chunk, np.ndarray):
                         outdata[:] = audio_chunk[:, np.newaxis]
                     elif audio_chunk == AUDIO_RESPONSE_DONE:
-                        self.should_listen.set()
-                        logger.debug("Response complete, listening re-enabled")
+                        if self._enabled():
+                            self.should_listen.set()
+                            logger.debug("Response complete, listening re-enabled")
                         outdata[:] = 0 * outdata
                     else:
                         outdata[:] = 0 * outdata

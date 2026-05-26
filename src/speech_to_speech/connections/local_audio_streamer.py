@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import sounddevice as sd
 
+from speech_to_speech.pipeline.audio_devices import AudioDeviceController
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE
 from speech_to_speech.pipeline.queue_types import AudioInItem, AudioOutItem
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 BARGE_IN_RMS_THRESHOLD = 900
 BARGE_IN_CONSECUTIVE_CHUNKS = 3
+DEVICE_CHECK_INTERVAL_SECONDS = 1.0
 
 
 class LocalAudioStreamer:
@@ -29,6 +31,7 @@ class LocalAudioStreamer:
         list_play_chunk_size: int = 512,
         input_device: str | int | None = None,
         output_device: str | int | None = None,
+        audio_devices: AudioDeviceController | None = None,
     ) -> None:
         self.list_play_chunk_size = list_play_chunk_size
 
@@ -39,8 +42,7 @@ class LocalAudioStreamer:
         self.enabled_event = enabled_event
         self.cancel_scope = cancel_scope
         self.interrupt_queues = interrupt_queues or []
-        self.input_device = input_device
-        self.output_device = output_device
+        self.audio_devices = audio_devices or AudioDeviceController(input_device, output_device)
         self._barge_in_chunks = 0
 
     def _enabled(self) -> bool:
@@ -117,9 +119,23 @@ class LocalAudioStreamer:
 
         logger.debug("Available devices:")
         logger.debug(sd.query_devices())
-        device = (self.input_device, self.output_device) if self.input_device is not None or self.output_device is not None else None
+        logger.info("Starting local audio stream")
+        while not self.stop_event.is_set():
+            device = self.audio_devices.resolve_stream_device()
+            version = self.audio_devices.version()
+            try:
+                self._run_stream(callback, device, version)
+            except sd.PortAudioError as error:
+                if device is None:
+                    raise
+                logger.warning("Could not open selected local audio devices; using system defaults: %s", error)
+                self.audio_devices.mark_fallback_to_default(f"selected device failed to open: {error}")
+                self._run_stream(callback, None, version)
+        print("Stopping recording")
+
+    def _run_stream(self, callback: Any, device: tuple[int | None, int | None] | None, version: int) -> None:
         if device is not None:
-            logger.info("Using local audio devices: input=%s output=%s", self.input_device, self.output_device)
+            logger.info("Using local audio devices: input=%s output=%s", device[0], device[1])
         with sd.Stream(
             samplerate=16000,
             dtype="int16",
@@ -128,7 +144,10 @@ class LocalAudioStreamer:
             callback=callback,
             blocksize=self.list_play_chunk_size,
         ):
-            logger.info("Starting local audio stream")
-            while not self.stop_event.is_set():
+            next_device_check = time.monotonic() + DEVICE_CHECK_INTERVAL_SECONDS
+            while not self.stop_event.is_set() and self.audio_devices.version() == version:
+                if time.monotonic() >= next_device_check:
+                    next_device_check = time.monotonic() + DEVICE_CHECK_INTERVAL_SECONDS
+                    if self.audio_devices.resolve_stream_device() != device:
+                        return
                 time.sleep(0.001)
-            print("Stopping recording")

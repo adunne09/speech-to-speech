@@ -7,6 +7,7 @@ from queue import Empty, Queue
 from threading import Event
 from typing import Any
 
+from speech_to_speech.pipeline.audio_devices import AudioDeviceController
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ class PipelineControlServer:
         port: int,
         queues_to_clear: list[Queue[Any]] | None = None,
         cancel_scope: CancelScope | None = None,
+        audio_devices: AudioDeviceController | None = None,
     ) -> None:
         self.stop_event = stop_event
         self.enabled_event = enabled_event
@@ -30,6 +32,7 @@ class PipelineControlServer:
         self.port = port
         self.queues_to_clear = queues_to_clear or []
         self.cancel_scope = cancel_scope
+        self.audio_devices = audio_devices
         self.server: ThreadingHTTPServer | None = None
 
     def _set_enabled(self, enabled: bool) -> None:
@@ -71,29 +74,62 @@ class PipelineControlServer:
                 self.end_headers()
                 self.wfile.write(payload)
 
-            def do_GET(self) -> None:
-                if self.path != "/pipeline/enabled":
-                    self._write_json(404, {"error": "not_found"})
-                    return
-                self._write_json(200, {"enabled": control.enabled_event.is_set()})
-
-            def do_PUT(self) -> None:
-                if self.path != "/pipeline/enabled":
-                    self._write_json(404, {"error": "not_found"})
-                    return
+            def _read_json(self) -> dict[str, Any] | None:
                 try:
                     length = int(self.headers.get("content-length", "0"))
                     data = json.loads(self.rfile.read(length) or b"{}")
                 except json.JSONDecodeError:
                     self._write_json(400, {"error": "invalid_json"})
+                    return None
+                if not isinstance(data, dict):
+                    self._write_json(400, {"error": "body must be an object"})
+                    return None
+                return data
+
+            def do_GET(self) -> None:
+                if self.path == "/pipeline/enabled":
+                    self._write_json(200, {"enabled": control.enabled_event.is_set()})
+                    return
+                if self.path == "/audio/devices" and control.audio_devices is not None:
+                    self._write_json(200, control.audio_devices.devices())
+                    return
+                if self.path == "/audio/settings" and control.audio_devices is not None:
+                    self._write_json(200, control.audio_devices.settings())
+                    return
+                self._write_json(404, {"error": "not_found"})
+
+            def do_PUT(self) -> None:
+                if self.path == "/pipeline/enabled":
+                    data = self._read_json()
+                    if data is None:
+                        return
+
+                    enabled = data.get("enabled")
+                    if not isinstance(enabled, bool):
+                        self._write_json(400, {"error": "enabled must be a boolean"})
+                        return
+                    control._set_enabled(enabled)
+                    self._write_json(200, {"enabled": control.enabled_event.is_set()})
                     return
 
-                enabled = data.get("enabled")
-                if not isinstance(enabled, bool):
-                    self._write_json(400, {"error": "enabled must be a boolean"})
+                if self.path == "/audio/settings" and control.audio_devices is not None:
+                    data = self._read_json()
+                    if data is None:
+                        return
+                    for key in ("input", "output"):
+                        if key in data and data[key] is not None and not isinstance(data[key], (str, int)):
+                            self._write_json(400, {"error": f"{key} must be a string, number, or null"})
+                            return
+                    control.audio_devices.set_devices(
+                        data.get("input"),
+                        data.get("output"),
+                        set_input="input" in data,
+                        set_output="output" in data,
+                    )
+                    self._write_json(200, control.audio_devices.settings())
                     return
-                control._set_enabled(enabled)
-                self._write_json(200, {"enabled": control.enabled_event.is_set()})
+
+                self._write_json(404, {"error": "not_found"})
 
         return ControlHandler
 

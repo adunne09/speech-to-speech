@@ -50,6 +50,7 @@ from speech_to_speech.arguments_classes.websocket_streamer_arguments import WebS
 from speech_to_speech.arguments_classes.whisper_stt_arguments import WhisperSTTHandlerArguments
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.LLM.chat import Chat
+from speech_to_speech.pipeline.audio_devices import AudioDeviceController
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut, STTIn, STTOut, TTSIn, TTSOut
 from speech_to_speech.pipeline.queue_types import (
@@ -91,6 +92,8 @@ def _sounddevice_device(value: str | None) -> str | int | None:
         return int(value)
     except ValueError:
         return value
+
+
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
@@ -147,6 +150,7 @@ def parse_arguments() -> ParsedArguments:
         _pre.add_argument("--llm_backend", default="responses-api")
         _llm_backend = _pre.parse_known_args()[0].llm_backend
 
+    _lm_class: type[Any]
     if _llm_backend == "responses-api":
         _lm_class = ResponsesApiLanguageModelHandlerArguments
     elif _llm_backend == "opencode":
@@ -393,9 +397,14 @@ def build_pipeline(
         enabled_event.set()
 
     comms_handlers: list[Any] = []
+    audio_devices: AudioDeviceController | None = None
     if module_kwargs.mode == "local":
         from speech_to_speech.connections.local_audio_streamer import LocalAudioStreamer
 
+        audio_devices = AudioDeviceController(
+            _sounddevice_device(module_kwargs.local_audio_input_device),
+            _sounddevice_device(module_kwargs.local_audio_output_device),
+        )
         local_audio_streamer = LocalAudioStreamer(
             input_queue=recv_audio_chunks_queue,
             output_queue=send_audio_chunks_queue,
@@ -403,8 +412,7 @@ def build_pipeline(
             enabled_event=enabled_event,
             cancel_scope=cancel_scope,
             interrupt_queues=[lm_response_queue, lm_processed_queue],
-            input_device=_sounddevice_device(module_kwargs.local_audio_input_device),
-            output_device=_sounddevice_device(module_kwargs.local_audio_output_device),
+            audio_devices=audio_devices,
         )
         comms_handlers = [local_audio_streamer]
         if enabled_event.is_set():
@@ -599,6 +607,7 @@ def build_pipeline(
                     send_audio_chunks_queue,
                 ],
                 cancel_scope=cancel_scope,
+                audio_devices=audio_devices,
             )
         )
 

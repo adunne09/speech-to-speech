@@ -7,6 +7,7 @@ from speech_to_speech.connections.local_audio_streamer import (
     BARGE_IN_CONSECUTIVE_CHUNKS,
     LocalAudioStreamer,
 )
+from speech_to_speech.pipeline.audio_devices import AudioDeviceController
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 
 
@@ -59,3 +60,37 @@ def test_interrupt_response_cancels_drains_and_forwards_audio() -> None:
     assert tts_queue.empty()
     assert lm_queue.empty()
     assert input_queue.get_nowait() == pcm.tobytes()
+
+
+def test_stream_exits_when_selected_device_becomes_unavailable(monkeypatch) -> None:
+    controller = AudioDeviceController()
+    streamer = LocalAudioStreamer(
+        input_queue=Queue(),
+        output_queue=Queue(),
+        should_listen=Event(),
+        audio_devices=controller,
+    )
+    calls = 0
+
+    def resolve_stream_device():
+        nonlocal calls
+        calls += 1
+        return (0, 1) if calls == 1 else None
+
+    class FakeStream:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            pass
+
+    monkeypatch.setattr(controller, "resolve_stream_device", resolve_stream_device)
+    monkeypatch.setattr("speech_to_speech.connections.local_audio_streamer.DEVICE_CHECK_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr("speech_to_speech.connections.local_audio_streamer.sd.Stream", FakeStream)
+
+    streamer._run_stream(lambda *_args: None, (0, 1), controller.version())
+
+    assert calls == 2

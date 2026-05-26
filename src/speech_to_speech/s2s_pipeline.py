@@ -401,6 +401,8 @@ def build_pipeline(
             output_queue=send_audio_chunks_queue,
             should_listen=should_listen,
             enabled_event=enabled_event,
+            cancel_scope=cancel_scope,
+            interrupt_queues=[lm_response_queue, lm_processed_queue],
             input_device=_sounddevice_device(module_kwargs.local_audio_input_device),
             output_device=_sounddevice_device(module_kwargs.local_audio_output_device),
         )

@@ -72,3 +72,11 @@ class ModuleArguments:
         default=None,
         metadata={"help": "Enable an HTTP API on this port to toggle the warmed pipeline on and off."},
     )
+    local_audio_input_device: str | None = field(
+        default=None,
+        metadata={"help": "Input device index or name for local mode. Uses the system default when unset."},
+    )
+    local_audio_output_device: str | None = field(
+        default=None,
+        metadata={"help": "Output device index or name for local mode. Uses the system default when unset."},
+    )

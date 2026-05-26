@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from speech_to_speech.pipeline.messages import TTSInput
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -123,12 +125,7 @@ def benchmark_handler(handler_name: str, text: str, iterations: int, handler_kwa
             )
         elif handler_name == "qwen3":
             from speech_to_speech.TTS.qwen3_tts_handler import Qwen3TTSHandler
-            setup_kwargs = {
-                "device": "cuda",
-                "model_name": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-                "ref_audio": "TTS/ref_audio.wav",
-                **setup_kwargs,
-            }
+            setup_kwargs = {"device": "cuda", **setup_kwargs}
             handler = Qwen3TTSHandler(
                 stop_event,
                 queue_in=queue_in,
@@ -169,7 +166,7 @@ def benchmark_handler(handler_name: str, text: str, iterations: int, handler_kwa
             first_output = True
             total_samples = 0
 
-            for chunk in handler.process(text):
+            for chunk in handler.process(TTSInput(text=text)):
                 if first_output:
                     time_to_first_chunk = time.perf_counter() - start_time
                     first_output = False

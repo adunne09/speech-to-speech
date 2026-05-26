@@ -8,6 +8,7 @@ from speech_to_speech.arguments_classes.kokoro_tts_arguments import KokoroTTSHan
 from speech_to_speech.arguments_classes.language_model_arguments import LanguageModelHandlerArguments
 from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import MLXAudioWhisperSTTHandlerArguments
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
+from speech_to_speech.arguments_classes.opencode_language_model_arguments import OpencodeLanguageModelHandlerArguments
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import ParakeetTDTSTTHandlerArguments
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
@@ -37,6 +38,8 @@ def test_release_defaults_match_responses_api_parakeet_qwen3_realtime_profile():
     assert module_args.enable_live_transcription is True
 
     assert vad_args.thresh == 0.6
+    assert vad_args.smart_turn is False
+    assert vad_args.smart_turn_threshold == 0.5
     assert responses_api_args.model_name == "gpt-5.4-mini"
     assert responses_api_args.chat_size == 30
     assert responses_api_args.responses_api_stream is True
@@ -63,6 +66,7 @@ EXPECTED_FIELD_TYPES = {
     "parakeet_tdt_stt_handler_kwargs": ParakeetTDTSTTHandlerArguments,
     "language_model_handler_kwargs": LanguageModelHandlerArguments,
     "responses_api_language_model_handler_kwargs": ResponsesApiLanguageModelHandlerArguments,
+    "opencode_language_model_handler_kwargs": OpencodeLanguageModelHandlerArguments,
     "chat_tts_handler_kwargs": ChatTTSHandlerArguments,
     "facebook_mms_tts_handler_kwargs": FacebookMMSTTSHandlerArguments,
     "pocket_tts_handler_kwargs": PocketTTSHandlerArguments,
@@ -97,6 +101,35 @@ def test_parse_arguments_default_backend_returns_openai_api():
     assert isinstance(args.language_model_handler_kwargs, LanguageModelHandlerArguments)
     assert args.responses_api_language_model_handler_kwargs.model_name == "gpt-5.4-mini"
     assert args.module_kwargs.llm_backend == "responses-api"
+
+
+def test_parse_arguments_accepts_smart_turn_flag():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = ["speech-to-speech", "--smart_turn"]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    assert args.vad_handler_kwargs.smart_turn is True
+
+
+def test_parse_arguments_accepts_local_audio_device_flags():
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = [
+            "speech-to-speech",
+            "--local_audio_input_device",
+            "4",
+            "--local_audio_output_device",
+            "2",
+        ]
+        args = parse_arguments()
+    finally:
+        sys.argv = original_argv
+
+    assert args.module_kwargs.local_audio_input_device == "4"
+    assert args.module_kwargs.local_audio_output_device == "2"
 
 
 def test_parse_arguments_transformers_backend():

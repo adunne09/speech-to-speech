@@ -17,6 +17,7 @@ from speech_to_speech.pipeline.handler_types import VADIn, VADOut
 from speech_to_speech.pipeline.messages import VADAudio
 from speech_to_speech.pipeline.queue_types import TextEventItem
 from speech_to_speech.utils.utils import int2float
+from speech_to_speech.VAD.smart_turn_detector import SmartTurnDetector
 from speech_to_speech.VAD.vad_iterator import VADIterator
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         audio_enhancement: bool = False,
         enable_realtime_transcription: bool = False,
         realtime_processing_pause: float = 0.25,
+        smart_turn: bool = False,
+        smart_turn_threshold: float = 0.5,
+        smart_turn_model_repo: str = "pipecat-ai/smart-turn-v3",
+        smart_turn_model_filename: str = "smart-turn-v3.2-cpu.onnx",
         text_output_queue: Queue[TextEventItem] | None = None,
         enabled_event: Event | None = None,
     ) -> None:
@@ -63,6 +68,16 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.enable_realtime_transcription = enable_realtime_transcription
         self.realtime_processing_pause = realtime_processing_pause
         self.text_output_queue = text_output_queue
+        self.smart_turn_detector = (
+            SmartTurnDetector(
+                model_repo=smart_turn_model_repo,
+                model_filename=smart_turn_model_filename,
+                threshold=smart_turn_threshold,
+            )
+            if smart_turn
+            else None
+        )
+        self._smart_turn_pending: list[np.ndarray] = []
         self._last_turn_detection: dict | None = None
         self.model, _ = torch.hub.load(
             "snakers4/silero-vad",
@@ -217,7 +232,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 self._speech_started_emitted = False
                 return
 
-            array = torch.cat(vad_output).cpu().numpy()
+            array = self._candidate_turn_audio(torch.cat(vad_output).cpu().numpy())
             duration_ms = len(array) / self.sample_rate * 1000
 
             if duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
@@ -227,6 +242,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if self._speech_started_emitted and self.text_output_queue:
                     self.text_output_queue.put(SpeechStoppedEvent(audio_end_ms=self._audio_ms))
                 self._speech_started_emitted = False
+                self._smart_turn_pending = []
+            elif not self._smart_turn_complete(array):
+                self._smart_turn_pending = [array]
+                logger.info("Smart Turn: turn appears incomplete; continuing to listen")
             else:
                 end_ms = self._audio_ms
                 if not self._speech_started_emitted and self.text_output_queue:
@@ -240,6 +259,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                     array = self._apply_audio_enhancement(array)
                 yield VADAudio(audio=array, mode="final")
                 self.last_process_time = 0.0
+                self._smart_turn_pending = []
                 self._speech_started_emitted = False
 
     def _process_normal(self, vad_output: list[torch.Tensor] | None) -> Iterator[VADOut]:
@@ -252,7 +272,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 self._speech_started_emitted = False
                 return
 
-            array = torch.cat(vad_output).cpu().numpy()
+            array = self._candidate_turn_audio(torch.cat(vad_output).cpu().numpy())
             duration_ms = len(array) / self.sample_rate * 1000
             if duration_ms < self.min_speech_ms or duration_ms > self.max_speech_ms:
                 logger.info(
@@ -261,6 +281,10 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if self._speech_started_emitted and self.text_output_queue:
                     self.text_output_queue.put(SpeechStoppedEvent(audio_end_ms=self._audio_ms))
                 self._speech_started_emitted = False
+                self._smart_turn_pending = []
+            elif not self._smart_turn_complete(array):
+                self._smart_turn_pending = [array]
+                logger.info("Smart Turn: turn appears incomplete; continuing to listen")
             else:
                 end_ms = self._audio_ms
                 if not self._speech_started_emitted and self.text_output_queue:
@@ -273,7 +297,29 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
                 if self.audio_enhancement:
                     array = self._apply_audio_enhancement(array)
                 yield VADAudio(audio=array)
+                self._smart_turn_pending = []
                 self._speech_started_emitted = False
+
+    def _candidate_turn_audio(self, array: np.ndarray) -> np.ndarray:
+        if not self._smart_turn_pending:
+            return array
+        return np.concatenate([*self._smart_turn_pending, array])
+
+    def _smart_turn_complete(self, array: np.ndarray) -> bool:
+        if self.smart_turn_detector is None:
+            return True
+        start_time = time.perf_counter()
+        result = self.smart_turn_detector.predict(array)
+        inference_ms = (time.perf_counter() - start_time) * 1000
+        audio_duration_s = len(array) / self.sample_rate
+        logger.info(
+            "Smart Turn: %s (probability=%.3f, inference=%.1fms, audio=%.2fs)",
+            "complete" if result.complete else "incomplete",
+            result.probability,
+            inference_ms,
+            audio_duration_s,
+        )
+        return result.complete
 
     def _apply_audio_enhancement(self, array: np.ndarray) -> np.ndarray:
         """Apply audio enhancement if enabled."""
@@ -305,6 +351,7 @@ class VADHandler(BaseHandler[VADIn, VADOut]):
         self.last_process_time = 0.0
         self._total_samples = 0
         self._speech_started_emitted = False
+        self._smart_turn_pending = []
         if self._enabled():
             self.should_listen.set()
         logger.debug("VAD session state reset")

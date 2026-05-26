@@ -1,0 +1,43 @@
+{
+  "results": [
+    {
+      "handler": "kokoro",
+      "warmup_time": 10.24892204200296,
+      "avg_inference_time": 0.48193576366611524,
+      "min_inference_time": 0.28045312500034925,
+      "max_inference_time": 0.8814074999972945,
+      "std_inference_time": 0.28247277426655437,
+      "avg_audio_duration": 2.8480000000000003,
+      "min_audio_duration": 2.848,
+      "max_audio_duration": 2.848,
+      "std_audio_duration": 4.440892098500626e-16,
+      "avg_rtf": 5.909501254555353,
+      "total_iterations": 3,
+      "errors": [],
+      "avg_time_to_first_chunk": 0.48186731933431776,
+      "min_time_to_first_chunk": 0.28039683400129434,
+      "max_time_to_first_chunk": 0.8813160830031848,
+      "std_time_to_first_chunk": 0.28245652759892986
+    },
+    {
+      "handler": "qwen3[6bit]",
+      "warmup_time": 4.957935999998881,
+      "avg_inference_time": 2.0848034026663904,
+      "min_inference_time": 2.0780903749982826,
+      "max_inference_time": 2.0906153329997323,
+      "std_inference_time": 0.005152839058199646,
+      "avg_audio_duration": 3.690666666666667,
+      "min_audio_duration": 3.648,
+      "max_audio_duration": 3.712,
+      "std_audio_duration": 0.030169889330626053,
+      "avg_rtf": 1.770270837982341,
+      "total_iterations": 3,
+      "errors": [],
+      "avg_time_to_first_chunk": 0.22531324966742736,
+      "min_time_to_first_chunk": 0.22324550000485033,
+      "max_time_to_first_chunk": 0.22772183299821336,
+      "std_time_to_first_chunk": 0.0018432787741605454
+    }
+  ],
+  "timestamp": "2026-05-26 08:49:05"
+}

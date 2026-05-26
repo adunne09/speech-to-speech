@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import threading
 import time
+from collections import defaultdict
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
@@ -21,6 +23,28 @@ from speech_to_speech.pipeline.handler_types import LLMIn, LLMOut
 from speech_to_speech.pipeline.messages import EndOfResponse, LLMResponseChunk
 
 logger = logging.getLogger(__name__)
+
+_BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+_id_lock = threading.Lock()
+_last_id_timestamp = 0
+_id_counter = 0
+
+
+class _FlushText:
+    pass
+
+
+_FLUSH_TEXT = _FlushText()
+
+
+def _preview(text: str, limit: int = 160) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
+def _ends_sentence(text: str) -> bool:
+    return text.rstrip().endswith((".", "!", "?"))
 
 
 class OpencodeSessionState:
@@ -198,6 +222,231 @@ class OpencodeModelHandler(BaseHandler[LLMIn, LLMOut]):
                 text_parts.append(part["text"])
         return "\n".join(text_parts).strip()
 
+    def _message_id(self) -> str:
+        global _id_counter, _last_id_timestamp
+        timestamp = int(time.time() * 1000)
+        with _id_lock:
+            if timestamp != _last_id_timestamp:
+                _last_id_timestamp = timestamp
+                _id_counter = 0
+            _id_counter += 1
+            encoded_time = (timestamp * 0x1000 + _id_counter) & 0xFFFFFFFFFFFF
+        random = "".join(secrets.choice(_BASE62) for _ in range(14))
+        return f"msg_{encoded_time:012x}{random}"
+
+    def _sse_events(self, response: httpx.Response) -> Iterator[dict[str, Any]]:
+        data_lines: list[str] = []
+
+        for line in response.iter_lines():
+            if line == "":
+                if not data_lines:
+                    continue
+                raw_data = "\n".join(data_lines)
+                data_lines = []
+                try:
+                    event = json.loads(raw_data)
+                except json.JSONDecodeError:
+                    logger.debug("Ignoring non-JSON opencode SSE payload: %s", raw_data)
+                    continue
+                if isinstance(event, dict):
+                    yield event
+                continue
+
+            if line.startswith("data:"):
+                data_lines.append(line.removeprefix("data:").lstrip())
+
+    def _post_prompt_async(self, session_id: str, message_id: str, text: str, system: str | None) -> None:
+        body: dict[str, Any] = {
+            "messageID": message_id,
+            "model": {"providerID": self.provider_id, "modelID": self.model_id},
+            "parts": [{"type": "text", "text": text}],
+        }
+        if system:
+            body["system"] = build_voice_system_prompt(system)
+
+        response = self.client.post(
+            f"{self.base_url}/session/{session_id}/prompt_async",
+            json=body,
+            **self._request_kwargs(),
+        )
+        response.raise_for_status()
+        logger.info(
+            "opencode prompt_async accepted session=%s user_message=%s chars=%d",
+            session_id,
+            message_id,
+            len(text),
+        )
+
+    def _stream_opencode_deltas(self, text: str, system: str | None) -> Iterator[str | _FlushText]:
+        session_id = self._ensure_session()
+        message_id = self._message_id()
+        assistant_message_ids: set[str] = set()
+        speakable_part_ids: set[str] = set()
+        unspeakable_part_ids: set[str] = set()
+        pending_deltas: dict[str, list[str]] = defaultdict(list)
+
+        logger.info("opencode opening SSE stream session=%s user_message=%s", session_id, message_id)
+        with self.client.stream(
+            "GET",
+            f"{self.base_url}/event",
+            headers={"Accept": "text/event-stream"},
+            **self._request_kwargs(),
+        ) as event_response:
+            event_response.raise_for_status()
+            connected = False
+            events = self._sse_events(event_response)
+            for event in events:
+                logger.debug("opencode SSE pre-prompt event type=%s", event.get("type"))
+                if event.get("type") == "server.connected":
+                    connected = True
+                    break
+
+            if not connected:
+                raise RuntimeError("opencode event stream closed before server.connected")
+
+            self._post_prompt_async(session_id, message_id, text, system)
+
+            for event in events:
+                event_type = event.get("type")
+                properties = event.get("properties") or {}
+                event_session_id = properties.get("sessionID")
+
+                if event_type == "session.error" and event_session_id in (None, session_id):
+                    error = properties.get("error") or {}
+                    logger.error("opencode session.error session=%s error=%s", event_session_id, error)
+                    raise RuntimeError(f"opencode prompt_async failed: {error}")
+
+                logger.debug(
+                    "opencode SSE event type=%s session=%s message=%s part=%s field=%s",
+                    event_type,
+                    event_session_id,
+                    properties.get("messageID"),
+                    properties.get("partID"),
+                    properties.get("field"),
+                )
+
+                if properties.get("sessionID") != session_id:
+                    logger.debug("opencode SSE ignored other session event type=%s session=%s", event_type, event_session_id)
+                    continue
+
+                if event_type == "message.updated":
+                    info = properties.get("info") or {}
+                    if info.get("role") == "assistant" and info.get("parentID") == message_id:
+                        assistant_id = info.get("id")
+                        if isinstance(assistant_id, str):
+                            assistant_message_ids.add(assistant_id)
+                            buffered = pending_deltas.pop(assistant_id, [])
+                            logger.info(
+                                "opencode assistant matched session=%s user_message=%s assistant_message=%s buffered_deltas=%d completed=%s",
+                                session_id,
+                                message_id,
+                                assistant_id,
+                                len(buffered),
+                                bool((info.get("time") or {}).get("completed")),
+                            )
+                            for buffered_delta in buffered:
+                                yield buffered_delta
+                        if (info.get("time") or {}).get("completed") and info.get("finish") == "tool-calls":
+                            logger.info(
+                                "opencode assistant tool-call step completed session=%s user_message=%s assistant_message=%s",
+                                session_id,
+                                message_id,
+                                assistant_id,
+                            )
+                            yield _FLUSH_TEXT
+                        elif (info.get("time") or {}).get("completed"):
+                            logger.info(
+                                "opencode assistant completed session=%s user_message=%s assistant_messages=%s pending_delta_messages=%s",
+                                session_id,
+                                message_id,
+                                sorted(assistant_message_ids),
+                                sorted(pending_deltas.keys()),
+                            )
+                            return
+                    continue
+
+                if event_type == "message.part.updated":
+                    part = properties.get("part") or {}
+                    part_id = part.get("id")
+                    part_message_id = part.get("messageID")
+                    part_type = part.get("type")
+                    if not isinstance(part_id, str) or part_message_id not in assistant_message_ids:
+                        continue
+                    if part_type == "text":
+                        speakable_part_ids.add(part_id)
+                        buffered = pending_deltas.pop(part_id, [])
+                        logger.info(
+                            "opencode text part matched session=%s message=%s part=%s buffered_deltas=%d",
+                            session_id,
+                            part_message_id,
+                            part_id,
+                            len(buffered),
+                        )
+                        for buffered_delta in buffered:
+                            yield buffered_delta
+                    else:
+                        unspeakable_part_ids.add(part_id)
+                        pending_deltas.pop(part_id, None)
+                        logger.debug(
+                            "opencode ignored non-text part session=%s message=%s part=%s type=%s",
+                            session_id,
+                            part_message_id,
+                            part_id,
+                            part_type,
+                        )
+                    continue
+
+                if event_type == "message.part.delta":
+                    if properties.get("field") != "text":
+                        continue
+                    delta_message_id = properties.get("messageID")
+                    delta_part_id = properties.get("partID")
+                    delta = properties.get("delta")
+                    if not isinstance(delta_message_id, str) or not isinstance(delta_part_id, str) or not isinstance(delta, str):
+                        logger.debug("opencode ignored malformed text delta properties=%s", properties)
+                        continue
+                    if delta_message_id not in assistant_message_ids:
+                        pending_deltas[delta_part_id].append(delta)
+                        logger.debug(
+                            "opencode buffered unmatched text delta session=%s message=%s chars=%d preview=%r",
+                            session_id,
+                            delta_message_id,
+                            len(delta),
+                            _preview(delta),
+                        )
+                        continue
+                    if delta_part_id in unspeakable_part_ids:
+                        logger.debug(
+                            "opencode ignored non-text delta session=%s message=%s part=%s chars=%d preview=%r",
+                            session_id,
+                            delta_message_id,
+                            delta_part_id,
+                            len(delta),
+                            _preview(delta),
+                        )
+                        continue
+                    if delta_part_id not in speakable_part_ids:
+                        pending_deltas[delta_part_id].append(delta)
+                        logger.debug(
+                            "opencode buffered untyped text delta session=%s message=%s part=%s chars=%d preview=%r",
+                            session_id,
+                            delta_message_id,
+                            delta_part_id,
+                            len(delta),
+                            _preview(delta),
+                        )
+                        continue
+                    logger.debug(
+                        "opencode yielding text delta session=%s message=%s part=%s chars=%d preview=%r",
+                        session_id,
+                        delta_message_id,
+                        delta_part_id,
+                        len(delta),
+                        _preview(delta),
+                    )
+                    yield delta
+                    continue
+
     def _prompt_opencode(self, text: str, system: str | None) -> str:
         session_id = self._ensure_session()
         body: dict[str, Any] = {
@@ -232,32 +481,97 @@ class OpencodeModelHandler(BaseHandler[LLMIn, LLMOut]):
             yield EndOfResponse()
             return
 
-        clean_text = remove_unspeechable(self._prompt_opencode(user_text, instructions))
-        if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
-            logger.info("opencode generation cancelled after response returned")
+        clean_text = ""
+        printable_text = ""
+        sentence_batch: list[str] = []
+        try:
+            for stream_item in self._stream_opencode_deltas(user_text, instructions):
+                if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+                    logger.info("opencode generation cancelled while streaming")
+                    yield EndOfResponse()
+                    return
+                if isinstance(stream_item, _FlushText):
+                    if printable_text.strip():
+                        sentence_batch.append(printable_text.strip())
+                        printable_text = ""
+                    if sentence_batch:
+                        chunk_text = " ".join(sentence_batch)
+                        logger.info(
+                            "opencode flushing LLM chunk chars=%d sentences=%d preview=%r",
+                            len(chunk_text),
+                            len(sentence_batch),
+                            _preview(chunk_text),
+                        )
+                        yield LLMResponseChunk(
+                            text=chunk_text,
+                            language_code=language_code,
+                            runtime_config=runtime_config,
+                            response=response,
+                        )
+                        sentence_batch = []
+                    continue
+                delta = stream_item
+                new_text = remove_unspeechable(delta)
+                clean_text += new_text
+                printable_text += new_text
+                sentences = sent_tokenize(printable_text)
+                logger.debug(
+                    "opencode chunk state delta_chars=%d clean_chars=%d printable_chars=%d sentences=%d batch=%d preview=%r",
+                    len(new_text),
+                    len(clean_text),
+                    len(printable_text),
+                    len(sentences),
+                    len(sentence_batch),
+                    _preview(printable_text),
+                )
+                complete_sentences = sentences if _ends_sentence(printable_text) else sentences[:-1]
+                if complete_sentences:
+                    for sentence in complete_sentences:
+                        sentence_batch.append(sentence)
+                        if len(sentence_batch) >= self.stream_batch_sentences:
+                            chunk_text = " ".join(sentence_batch)
+                            logger.info(
+                                "opencode yielding LLM chunk chars=%d sentences=%d preview=%r",
+                                len(chunk_text),
+                                len(sentence_batch),
+                                _preview(chunk_text),
+                            )
+                            yield LLMResponseChunk(
+                                text=chunk_text,
+                                language_code=language_code,
+                                runtime_config=runtime_config,
+                                response=response,
+                            )
+                            sentence_batch = []
+                    printable_text = "" if len(complete_sentences) == len(sentences) else sentences[-1]
+        except Exception:
+            logger.exception("opencode streaming failed; ending response to re-enable listening")
             yield EndOfResponse()
             return
+
+        if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+            logger.info("opencode generation cancelled after stream ended")
+            yield EndOfResponse()
+            return
+
         original_chat.add_item(make_assistant_message(clean_text))
-        printable_text = clean_text
-        sentence_batch: list[str] = []
-        sentences = sent_tokenize(printable_text)
-        for sentence in sentences:
-            sentence_batch.append(sentence)
-            if len(sentence_batch) >= self.stream_batch_sentences:
-                yield LLMResponseChunk(
-                    text=" ".join(sentence_batch),
-                    language_code=language_code,
-                    runtime_config=runtime_config,
-                    response=response,
-                )
-                sentence_batch = []
-        if sentence_batch or not sentences:
+        if printable_text.strip():
+            sentence_batch.append(printable_text.strip())
+        if sentence_batch or not clean_text:
+            final_chunk_text = " ".join(sentence_batch) if sentence_batch else clean_text
+            logger.info(
+                "opencode yielding final LLM chunk chars=%d sentences=%d preview=%r",
+                len(final_chunk_text),
+                len(sentence_batch),
+                _preview(final_chunk_text),
+            )
             yield LLMResponseChunk(
-                text=" ".join(sentence_batch) if sentence_batch else clean_text,
+                text=final_chunk_text,
                 language_code=language_code,
                 runtime_config=runtime_config,
                 response=response,
             )
+        logger.info("opencode response complete clean_chars=%d", len(clean_text))
         original_chat.strip_images()
         yield EndOfResponse()
 

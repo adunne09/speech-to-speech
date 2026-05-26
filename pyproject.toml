@@ -55,6 +55,8 @@ dependencies = [
     "mlx-lm==0.31.1; platform_system == 'Darwin'",
     "mlx-metal==0.31.1; platform_system == 'Darwin'",
     "misaki>=0.9.4; platform_system == 'Darwin'",
+    "num2words>=0.5.14; platform_system == 'Darwin'",
+    "onnxruntime>=1.23.0",
     "espeakng-loader>=0.2.4; platform_system == 'Darwin'",
     "spacy>=3.8.4; platform_system == 'Darwin'",
     "phonemizer-fork>=3.3.2; platform_system == 'Darwin'",

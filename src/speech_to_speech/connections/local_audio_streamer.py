@@ -20,6 +20,8 @@ class LocalAudioStreamer:
         should_listen: threading.Event,
         enabled_event: threading.Event | None = None,
         list_play_chunk_size: int = 512,
+        input_device: str | int | None = None,
+        output_device: str | int | None = None,
     ) -> None:
         self.list_play_chunk_size = list_play_chunk_size
 
@@ -28,6 +30,8 @@ class LocalAudioStreamer:
         self.output_queue = output_queue
         self.should_listen = should_listen
         self.enabled_event = enabled_event
+        self.input_device = input_device
+        self.output_device = output_device
 
     def _enabled(self) -> bool:
         return self.enabled_event is None or self.enabled_event.is_set()
@@ -65,10 +69,14 @@ class LocalAudioStreamer:
 
         logger.debug("Available devices:")
         logger.debug(sd.query_devices())
+        device = (self.input_device, self.output_device) if self.input_device is not None or self.output_device is not None else None
+        if device is not None:
+            logger.info("Using local audio devices: input=%s output=%s", self.input_device, self.output_device)
         with sd.Stream(
             samplerate=16000,
             dtype="int16",
             channels=1,
+            device=device,
             callback=callback,
             blocksize=self.list_play_chunk_size,
         ):

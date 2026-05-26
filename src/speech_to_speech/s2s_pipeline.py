@@ -31,15 +31,15 @@ from speech_to_speech.arguments_classes.mlx_audio_whisper_arguments import (
     MLXAudioWhisperSTTHandlerArguments,
 )
 from speech_to_speech.arguments_classes.module_arguments import ModuleArguments
+from speech_to_speech.arguments_classes.opencode_language_model_arguments import (
+    OpencodeLanguageModelHandlerArguments,
+)
 from speech_to_speech.arguments_classes.paraformer_stt_arguments import ParaformerSTTHandlerArguments
 from speech_to_speech.arguments_classes.parakeet_tdt_arguments import (
     ParakeetTDTSTTHandlerArguments,
 )
 from speech_to_speech.arguments_classes.pocket_tts_arguments import PocketTTSHandlerArguments
 from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandlerArguments
-from speech_to_speech.arguments_classes.opencode_language_model_arguments import (
-    OpencodeLanguageModelHandlerArguments,
-)
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
 )
@@ -82,6 +82,15 @@ CURRENT_DIR = Path(__file__).resolve().parent
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(CURRENT_DIR, "tmp")
 
 console = Console()
+
+
+def _sounddevice_device(value: str | None) -> str | int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return value
 logger = logging.getLogger(__name__)
 logging.getLogger("numba").setLevel(logging.WARNING)  # quiet down numba logs
 
@@ -392,10 +401,14 @@ def build_pipeline(
             output_queue=send_audio_chunks_queue,
             should_listen=should_listen,
             enabled_event=enabled_event,
+            input_device=_sounddevice_device(module_kwargs.local_audio_input_device),
+            output_device=_sounddevice_device(module_kwargs.local_audio_output_device),
         )
         comms_handlers = [local_audio_streamer]
         if enabled_event.is_set():
             should_listen.set()
+        else:
+            logger.warning("Local mode is warmed but disabled; pass --start_enabled or enable it via control API")
     elif module_kwargs.mode == "websocket":
         from speech_to_speech.connections.websocket_streamer import WebSocketStreamer
 

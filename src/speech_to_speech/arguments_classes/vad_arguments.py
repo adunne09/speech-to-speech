@@ -55,3 +55,21 @@ class VADHandlerArguments:
             "help": "Interval (in seconds) for releasing progressive audio chunks during speech. Default is 0.2s."
         },
     )
+    smart_turn: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable Pipecat Smart Turn endpoint detection after Silero detects candidate silence. Default is False."
+        },
+    )
+    smart_turn_threshold: float = field(
+        default=0.5,
+        metadata={"help": "Completion probability threshold for Smart Turn. Default is 0.5."},
+    )
+    smart_turn_model_repo: str = field(
+        default="pipecat-ai/smart-turn-v3",
+        metadata={"help": "Hugging Face repo containing the Smart Turn ONNX model."},
+    )
+    smart_turn_model_filename: str = field(
+        default="smart-turn-v3.2-cpu.onnx",
+        metadata={"help": "ONNX model filename inside the Smart Turn Hugging Face repo."},
+    )

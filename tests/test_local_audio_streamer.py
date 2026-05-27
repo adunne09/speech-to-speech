@@ -137,6 +137,27 @@ def test_maybe_interrupt_cancels_with_echo_cancelled_user_audio() -> None:
     assert input_queue.get_nowait() == cleaned_user_audio.tobytes()
 
 
+def test_maybe_interrupt_ignores_user_audio_when_interrupts_are_disabled() -> None:
+    input_queue = Queue()
+    should_listen = Event()
+    interrupt_enabled = Event()
+    streamer = LocalAudioStreamer(
+        input_queue=input_queue,
+        output_queue=Queue(),
+        should_listen=should_listen,
+        interrupt_enabled_event=interrupt_enabled,
+        echo_canceller=FakeEchoCanceller(),
+    )
+    streamer._playback_chunks = BARGE_IN_WARMUP_CHUNKS
+
+    user_audio = np.full((512, 1), 5000, dtype=np.int16)
+    for _ in range(BARGE_IN_CONSECUTIVE_CHUNKS + 1):
+        assert not streamer._maybe_interrupt_response(user_audio)
+
+    assert not should_listen.is_set()
+    assert input_queue.empty()
+
+
 def test_maybe_interrupt_uses_higher_threshold_during_aec_warmup() -> None:
     streamer = LocalAudioStreamer(
         input_queue=Queue(),

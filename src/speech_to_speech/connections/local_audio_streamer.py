@@ -31,6 +31,7 @@ class LocalAudioStreamer:
         output_queue: Queue[AudioOutItem],
         should_listen: threading.Event,
         enabled_event: threading.Event | None = None,
+        interrupt_enabled_event: threading.Event | None = None,
         cancel_scope: CancelScope | None = None,
         interrupt_queues: list[Queue[Any]] | None = None,
         list_play_chunk_size: int = 512,
@@ -46,6 +47,7 @@ class LocalAudioStreamer:
         self.output_queue = output_queue
         self.should_listen = should_listen
         self.enabled_event = enabled_event
+        self.interrupt_enabled_event = interrupt_enabled_event
         self.cancel_scope = cancel_scope
         self.interrupt_queues = interrupt_queues or []
         self.audio_devices = audio_devices or AudioDeviceController(input_device, output_device)
@@ -65,6 +67,9 @@ class LocalAudioStreamer:
 
     def _enabled(self) -> bool:
         return self.enabled_event is None or self.enabled_event.is_set()
+
+    def _interrupt_enabled(self) -> bool:
+        return self.interrupt_enabled_event is None or self.interrupt_enabled_event.is_set()
 
     def _drain_queue(self, queue: Queue[Any]) -> int:
         drained = 0
@@ -101,7 +106,7 @@ class LocalAudioStreamer:
         logger.info("Interrupted local audio response; drained %s queued item(s)", drained)
 
     def _maybe_interrupt_response(self, pcm: np.ndarray) -> bool:
-        if not self._enabled() or self.should_listen.is_set():
+        if not self._enabled() or not self._interrupt_enabled() or self.should_listen.is_set():
             self._barge_in_chunks = 0
             return False
 
@@ -109,9 +114,7 @@ class LocalAudioStreamer:
         clean_pcm = self.echo_canceller.process_capture(pcm)
         clean_rms = self._rms(clean_pcm)
         threshold = (
-            BARGE_IN_WARMUP_RMS_THRESHOLD
-            if self._playback_chunks < BARGE_IN_WARMUP_CHUNKS
-            else BARGE_IN_RMS_THRESHOLD
+            BARGE_IN_WARMUP_RMS_THRESHOLD if self._playback_chunks < BARGE_IN_WARMUP_CHUNKS else BARGE_IN_RMS_THRESHOLD
         )
         if raw_rms >= BARGE_IN_DEBUG_MIN_RMS or clean_rms >= BARGE_IN_DEBUG_MIN_RMS:
             logger.debug(

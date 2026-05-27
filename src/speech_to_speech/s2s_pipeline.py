@@ -343,6 +343,7 @@ def initialize_queues_and_events() -> dict[str, Any]:
         "stop_event": Event(),
         "should_listen": Event(),
         "enabled_event": Event(),
+        "interrupt_enabled_event": Event(),
         "response_playing": Event(),
         "cancel_scope": CancelScope(),
         "recv_audio_chunks_queue": Queue[AudioInItem](),
@@ -380,6 +381,7 @@ def build_pipeline(
     stop_event = queues_and_events["stop_event"]
     should_listen = queues_and_events["should_listen"]
     enabled_event = queues_and_events["enabled_event"]
+    interrupt_enabled_event = queues_and_events["interrupt_enabled_event"]
     response_playing = queues_and_events["response_playing"]
     cancel_scope = queues_and_events["cancel_scope"]
     recv_audio_chunks_queue = queues_and_events["recv_audio_chunks_queue"]
@@ -395,6 +397,7 @@ def build_pipeline(
 
     if module_kwargs.start_enabled:
         enabled_event.set()
+    interrupt_enabled_event.set()
 
     comms_handlers: list[Any] = []
     audio_devices: AudioDeviceController | None = None
@@ -410,6 +413,7 @@ def build_pipeline(
             output_queue=send_audio_chunks_queue,
             should_listen=should_listen,
             enabled_event=enabled_event,
+            interrupt_enabled_event=interrupt_enabled_event,
             cancel_scope=cancel_scope,
             interrupt_queues=[lm_response_queue, lm_processed_queue],
             audio_devices=audio_devices,
@@ -594,6 +598,7 @@ def build_pipeline(
             PipelineControlServer(
                 stop_event,
                 enabled_event,
+                interrupt_enabled_event,
                 should_listen,
                 module_kwargs.control_host,
                 module_kwargs.control_port,

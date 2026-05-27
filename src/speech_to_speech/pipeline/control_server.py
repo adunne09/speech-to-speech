@@ -18,6 +18,7 @@ class PipelineControlServer:
         self,
         stop_event: Event,
         enabled_event: Event,
+        interrupt_enabled_event: Event,
         should_listen: Event,
         host: str,
         port: int,
@@ -27,6 +28,7 @@ class PipelineControlServer:
     ) -> None:
         self.stop_event = stop_event
         self.enabled_event = enabled_event
+        self.interrupt_enabled_event = interrupt_enabled_event
         self.should_listen = should_listen
         self.host = host
         self.port = port
@@ -90,6 +92,9 @@ class PipelineControlServer:
                 if self.path == "/pipeline/enabled":
                     self._write_json(200, {"enabled": control.enabled_event.is_set()})
                     return
+                if self.path == "/pipeline/interrupts/enabled":
+                    self._write_json(200, {"enabled": control.interrupt_enabled_event.is_set()})
+                    return
                 if self.path == "/audio/devices" and control.audio_devices is not None:
                     self._write_json(200, control.audio_devices.devices())
                     return
@@ -110,6 +115,23 @@ class PipelineControlServer:
                         return
                     control._set_enabled(enabled)
                     self._write_json(200, {"enabled": control.enabled_event.is_set()})
+                    return
+
+                if self.path == "/pipeline/interrupts/enabled":
+                    data = self._read_json()
+                    if data is None:
+                        return
+
+                    enabled = data.get("enabled")
+                    if not isinstance(enabled, bool):
+                        self._write_json(400, {"error": "enabled must be a boolean"})
+                        return
+                    if enabled:
+                        control.interrupt_enabled_event.set()
+                    else:
+                        control.interrupt_enabled_event.clear()
+                    logger.info("Pipeline interrupts %s", "enabled" if enabled else "disabled")
+                    self._write_json(200, {"enabled": control.interrupt_enabled_event.is_set()})
                     return
 
                 if self.path == "/audio/settings" and control.audio_devices is not None:
